@@ -588,6 +588,8 @@ CONVERSATION HISTORY:
 
 USER'S CURRENT MESSAGE: "{user_message}"
 
+IMPORTANT: If the user message contains "step-by-step" AND mentions a scheme name, provide the complete step-by-step application guide for that scheme.
+
 INSTRUCTIONS:
 
 1. IF USER PROFILE IS INCOMPLETE:
@@ -606,7 +608,7 @@ INSTRUCTIONS:
      * Required documents
      * Application link
 
-3. IF USER ASKS "HOW TO APPLY" OR CLICKS "GET STEP-BY-STEP GUIDE":
+3. IF USER ASKS "HOW TO APPLY" OR "STEP-BY-STEP GUIDE" OR "STEP-BY-STEP GUIDANCE":
    Provide this EXACT format:
 
    "Let me guide you step-by-step to apply for [SCHEME NAME]:

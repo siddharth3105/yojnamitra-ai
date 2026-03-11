@@ -1317,11 +1317,7 @@ Me: "Excellent! \u2705 Ab main aapke liye schemes dhundh raha hoon..."
                     if st.button(f"🔗 Open Portal", key=f"link_{scheme['name']}", use_container_width=True):
                         st.markdown(f"**Application Link:** [{scheme['apply_link']}]({scheme['apply_link']})")
                         st.success("💡 Tip: Ask me for help if you get stuck!")
-                
-                with col2:
-                    if st.button(f"🔗 Open Application Link", key=f"link_{scheme['name']}", use_container_width=True):
-                        st.markdown(f"Opening: [{scheme['apply_link']}]({scheme['apply_link']})")
-                        st.info(f"💡 Tip: Ask me for help if you get stuck during application!")
+    
     
     st.markdown('</div>', unsafe_allow_html=True)
     

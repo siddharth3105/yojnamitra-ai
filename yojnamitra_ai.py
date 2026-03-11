@@ -1212,11 +1212,6 @@ def main():
             """)
         
         st.markdown("---")
-    
-    else:
-            st.info("Profile will be collected during conversation")
-        
-        st.markdown("---")
         
         # Notifications
         st.markdown("### 🔔 Notifications")

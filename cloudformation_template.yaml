@@ -1,0 +1,464 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: YojnaMitra - AI-Powered Government Scheme Recommendation System
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  BedrockModelId:
+    Type: String
+    Default: meta.llama3-8b-instruct-v1:0
+    Description: Amazon Bedrock model ID
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.11
+    MemorySize: 512
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        USERS_TABLE: !Ref UsersTable
+        SCHEMES_TABLE: !Ref SchemesTable
+        APPLICATIONS_TABLE: !Ref ApplicationsTable
+        HISTORY_TABLE: !Ref SearchHistoryTable
+
+Resources:
+  # ==================== DynamoDB Tables ====================
+  
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub YojnaMitra-Users-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: YojnaMitra
+
+  SchemesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub YojnaMitra-Schemes-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: schemeId
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: state
+          AttributeType: S
+      KeySchema:
+        - AttributeName: schemeId
+          KeyType: HASH
+        - AttributeName: category
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: StateIndex
+          KeySchema:
+            - AttributeName: state
+              KeyType: HASH
+            - AttributeName: category
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApplicationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub YojnaMitra-Applications-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: applicationId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: applicationId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  SearchHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub YojnaMitra-SearchHistory-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: searchId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: searchId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==================== S3 Buckets ====================
+  
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub yojnamitra-documents-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldDocuments
+            Status: Enabled
+            ExpirationInDays: 90
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub yojnamitra-reports-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  AnalyticsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub yojnamitra-analytics-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==================== Lambda Functions ====================
+  
+  SchemeMatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-SchemeMatcher-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_scheme_matcher
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SchemesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SearchHistoryTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /api/v1/search
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  AIRecommendationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-AIRecommendation-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_ai_recommendations
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ApplicationsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /api/v1/recommend
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  DocumentProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-DocumentProcessor-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_document_processor
+      Timeout: 60
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - textract:DetectDocumentText
+                - textract:AnalyzeDocument
+                - comprehend:DetectEntities
+                - comprehend:DetectLanguage
+              Resource: '*'
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref DocumentsBucket
+            Events: s3:ObjectCreated:*
+
+  TranslateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-Translate-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_translate
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - translate:TranslateText
+              Resource: '*'
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /api/v1/translate
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  NotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-Notification-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_send_notification
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /api/v1/notify
+            Method: POST
+            RestApiId: !Ref ApiGateway
+
+  DataSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-DataSync-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_data_sync
+      Timeout: 300
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SchemesTable
+      Events:
+        DailySync:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Description: Daily scheme database sync
+
+  AnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub YojnaMitra-Analytics-${Environment}
+      CodeUri: ./lambda_functions/
+      Handler: lambda_functions.lambda_handler_analytics
+      Timeout: 300
+      Environment:
+        Variables:
+          ANALYTICS_BUCKET: !Ref AnalyticsBucket
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SearchHistoryTable
+        - S3CrudPolicy:
+            BucketName: !Ref AnalyticsBucket
+      Events:
+        HourlyAnalytics:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 * * * ? *)
+            Description: Hourly analytics processing
+
+  # ==================== API Gateway ====================
+  
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub YojnaMitra-API-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
+      Auth:
+        ApiKeyRequired: true
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: YojnaMitra API
+          version: '1.0'
+        paths:
+          /api/v1/search:
+            post:
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SchemeMatcherFunction.Arn}/invocations
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub YojnaMitra-ApiKey-${Environment}
+      Enabled: true
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub YojnaMitra-UsagePlan-${Environment}
+      ApiStages:
+        - ApiId: !Ref ApiGateway
+          Stage: !Ref Environment
+      Throttle:
+        RateLimit: 1000
+        BurstLimit: 2000
+      Quota:
+        Limit: 100000
+        Period: MONTH
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+  # ==================== SNS Topic ====================
+  
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub YojnaMitra-Notifications-${Environment}
+      DisplayName: YojnaMitra Notifications
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==================== CloudWatch Alarms ====================
+  
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub YojnaMitra-HighErrorRate-${Environment}
+      AlarmDescription: Alert when error rate exceeds 5%
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref NotificationTopic
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub YojnaMitra-HighLatency-${Environment}
+      AlarmDescription: Alert when API latency exceeds 3 seconds
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref NotificationTopic
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+
+  ApiKey:
+    Description: API Key for authentication
+    Value: !Ref ApiKey
+
+  DocumentsBucketName:
+    Description: S3 bucket for documents
+    Value: !Ref DocumentsBucket
+
+  ReportsBucketName:
+    Description: S3 bucket for reports
+    Value: !Ref ReportsBucket
+
+  UsersTableName:
+    Description: DynamoDB Users table
+    Value: !Ref UsersTable
+
+  SchemesTableName:
+    Description: DynamoDB Schemes table
+    Value: !Ref SchemesTable

@@ -461,6 +461,10 @@ class YojnaMitraAI:
     def get_response(self, user_message: str, user_profile: Dict, conversation_history: List) -> str:
         """Get AI response using Bedrock"""
         
+        # Check if this is a step-by-step guide request
+        is_guide_request = any(keyword in user_message.lower() for keyword in 
+                              ['step-by-step', 'how to apply', 'apply for', 'application guide', 'guidance', 'help me apply'])
+        
         # Build conversation context
         context = self._build_context(user_message, user_profile, conversation_history)
         
@@ -480,7 +484,7 @@ class YojnaMitraAI:
                         }
                     ],
                     inferenceConfig={
-                        "maxTokens": 1000,
+                        "maxTokens": 2000,  # Increased for complete step-by-step guides
                         "temperature": 0.7,
                         "topP": 0.9
                     }
@@ -498,7 +502,7 @@ class YojnaMitraAI:
                         modelId=self.model_id,
                         body=json.dumps({
                             "anthropic_version": "bedrock-2023-05-31",
-                            "max_tokens": 600,
+                            "max_tokens": 2000,
                             "temperature": 0.7,
                             "messages": [
                                 {
@@ -518,7 +522,7 @@ class YojnaMitraAI:
                         modelId=self.model_id,
                         body=json.dumps({
                             "prompt": context,
-                            "max_gen_len": 600,
+                            "max_gen_len": 2000,
                             "temperature": 0.7,
                             "top_p": 0.9
                         })
@@ -530,10 +534,20 @@ class YojnaMitraAI:
             # Clean response
             ai_response = self._clean_response(ai_response, context)
             
+            # If this was a guide request but response doesn't contain all 5 steps, provide fallback guide
+            if is_guide_request and ai_response:
+                step_count = sum(1 for i in range(1, 6) if f"STEP {i}" in ai_response.upper())
+                if step_count < 5:
+                    logger.warning(f"AI response only had {step_count}/5 steps, providing fallback guide")
+                    return self._get_fallback_guide(user_message, user_profile)
+            
             return ai_response if ai_response else self._fallback_response(user_message, user_profile)
             
         except Exception as e:
             logger.error(f"AI response error: {e}")
+            # If it was a guide request, provide fallback guide instead of generic response
+            if is_guide_request:
+                return self._get_fallback_guide(user_message, user_profile)
             return self._fallback_response(user_message, user_profile)
     
     def _get_conversation_stage(self, user_profile: Dict) -> str:
@@ -588,7 +602,10 @@ CONVERSATION HISTORY:
 
 USER'S CURRENT MESSAGE: "{user_message}"
 
-IMPORTANT: If the user message contains "step-by-step" AND mentions a scheme name, provide the complete step-by-step application guide for that scheme.
+CRITICAL INSTRUCTION - DETECT APPLICATION GUIDE REQUESTS:
+If the user message contains ANY of these keywords: "step-by-step", "how to apply", "apply for", "application guide", "guidance", "help me apply"
+AND mentions a scheme name (PM-KISAN, Ayushman Bharat, MUDRA, NSP, PM Awas, etc.)
+THEN you MUST provide the complete step-by-step application guide (see instruction #3 below).
 
 INSTRUCTIONS:
 
@@ -608,8 +625,10 @@ INSTRUCTIONS:
      * Required documents
      * Application link
 
-3. IF USER ASKS "HOW TO APPLY" OR "STEP-BY-STEP GUIDE" OR "STEP-BY-STEP GUIDANCE":
-   Provide this EXACT format:
+3. IF USER ASKS FOR APPLICATION HELP (detected by keywords above):
+   YOU MUST provide this EXACT format - DO NOT SKIP ANY STEPS - THIS IS MANDATORY:
+   
+   IMPORTANT: Provide ALL 5 STEPS in complete detail. Do not summarize or shorten.
 
    "Let me guide you step-by-step to apply for [SCHEME NAME]:
 
@@ -723,6 +742,98 @@ RESPOND NOW (in a natural, helpful way):"""""""""
         
         else:
             return f"Perfect {user_profile['name']} ji! Ab main aapke liye best government schemes dhundh raha hoon... 🔍"
+    
+    def _get_fallback_guide(self, user_message: str, user_profile: Dict) -> str:
+        """Provide fallback step-by-step guide when AI doesn't generate complete guide"""
+        
+        # Extract scheme name from message
+        scheme_name = "the scheme"
+        scheme_url = "the official portal"
+        
+        # Try to identify scheme from message
+        schemes_map = {
+            'pm-kisan': ('PM-KISAN', 'https://pmkisan.gov.in'),
+            'pmkisan': ('PM-KISAN', 'https://pmkisan.gov.in'),
+            'kisan': ('PM-KISAN', 'https://pmkisan.gov.in'),
+            'ayushman': ('Ayushman Bharat', 'https://pmjay.gov.in'),
+            'pmjay': ('Ayushman Bharat', 'https://pmjay.gov.in'),
+            'mudra': ('MUDRA Loan', 'https://www.mudra.org.in'),
+            'scholarship': ('National Scholarship Portal', 'https://scholarships.gov.in'),
+            'nsp': ('National Scholarship Portal', 'https://scholarships.gov.in'),
+            'awas': ('PM Awas Yojana', 'https://pmaymis.gov.in'),
+            'housing': ('PM Awas Yojana', 'https://pmaymis.gov.in')
+        }
+        
+        message_lower = user_message.lower()
+        for key, (name, url) in schemes_map.items():
+            if key in message_lower:
+                scheme_name = name
+                scheme_url = url
+                break
+        
+        return f"""Let me guide you step-by-step to apply for {scheme_name}:
+
+**STEP 1: Open Application Link & Login**
+Click this link: {scheme_url}
+
+If you're a new user:
+- Click 'Register' or 'New Registration'
+- Enter your mobile number
+- Verify OTP sent to your phone
+- Create a strong password
+- Login with your credentials
+
+If you already have an account:
+- Click 'Login'
+- Enter your username and password
+
+**STEP 2: Find the Scheme**
+After logging in:
+- Use the search bar and type '{scheme_name}'
+- OR navigate to the relevant category (Agriculture/Education/Health/Business)
+- Click on the scheme name to open the application form
+
+**STEP 3: Fill All Required Details**
+Fill in these details carefully:
+- Personal Information: Full Name (exactly as per Aadhar), Date of Birth, Gender
+- Contact Details: Mobile number, Email address, Complete address with Pin Code
+- Identity Details: Aadhar number, PAN card number (if required)
+- Bank Details: Bank account number, IFSC code, Bank name
+- Scheme-specific information (varies by scheme)
+
+IMPORTANT: Make sure all details match your Aadhar card exactly!
+Fill all mandatory fields (marked with * asterisk)
+
+**STEP 4: Upload Required Documents**
+Upload these documents if the form asks for them:
+- Aadhar Card (PDF or JPG format, maximum 2MB)
+- Passport size photograph (JPG format, maximum 100KB)
+- Bank Passbook or Cancelled Cheque (first page showing account details)
+- Income Certificate (if required for the scheme)
+- Any other scheme-specific documents
+
+To upload: Click 'Choose File' or 'Browse' → Select the document from your computer → Click 'Upload'
+
+Note: Some schemes may not require document upload at this stage
+
+**STEP 5: Review, Submit & Get Confirmation**
+Before submitting:
+- Carefully review all the information you entered
+- Make sure everything is correct
+- Tick the declaration checkbox (if present)
+- Click the 'Submit' or 'Apply' button
+
+After submission:
+- You will see a confirmation message
+- SAVE YOUR APPLICATION ID (example: {scheme_name.upper().replace(' ', '').replace('-', '')}2026XXXXX)
+- Take a screenshot of the confirmation page
+- You will receive a confirmation SMS on your registered mobile number
+- You may also receive a confirmation email
+- Save the tracking link to check your application status later
+
+Congratulations! Your application is submitted. You'll receive confirmation via SMS/Email shortly.
+
+Need help with any specific step? Just ask! 😊"""
 
 
 
@@ -1236,29 +1347,18 @@ def main():
     
     # Display messages
     if not st.session_state.messages:
-        # Welcome message with example conversation
-        welcome = u"""Hi! \U0001F44B Main **YojnaMitra-AI** hoon!
+        # Welcome message - SIMPLIFIED AND FOCUSED ON CORE VALUE
+        welcome = """Hi! 👋 Main **YojnaMitra-AI** hoon!
 
-Main aapko Indian Government schemes dhundne mein madad karunga!
+🎯 **Main 2 minute mein aapke liye:**
+✅ 500+ schemes mein se best schemes dhundhunga
+✅ Eligibility check karke matching schemes dikhaunga
+✅ Step-by-step apply karne mein help karunga
+✅ Aapki language mein baat karunga (12+ languages)
 
-**\U0001F4DD Example Conversation:**
-```
-You: "Mera naam Rahul hai, 25 saal ka hu, Bihar se"
-Me: "Great Rahul ji! Aap kya kaam karte ho?"
-You: "Farming karta hu"
-Me: "Perfect! Yearly income kitni hai?"
-You: "3 lakh"
-Me: "Excellent! \u2705 Ab main aapke liye schemes dhundh raha hoon..."
-```
+**Bas 5 simple questions!** Chalo shuru karte hain! 😊
 
-**Main kya kar sakta hoon:**
-\u2705 500+ schemes mein se best schemes dhundhna
-\u2705 Eligibility check karke matching schemes dikhana
-\u2705 Step-by-step application guidance dena
-\u2705 Document checklist provide karna
-\u2705 SMS/Email confirmation tracking
-
-**Chalo shuru karte hain!** Aapka naam kya hai? \U0001F60A"""
+Aapka naam kya hai?"""
         
         # Translate welcome message if needed
         translated_welcome = translate_text(welcome, st.session_state.selected_language)
@@ -1283,14 +1383,27 @@ Me: "Excellent! \u2705 Ab main aapke liye schemes dhundh raha hoon..."
         st.markdown("### 🎯 Matched Schemes for You")
         
         for scheme in st.session_state.matched_schemes[:5]:
-            # Show match score if available
+            # Show match score and priority indicator
             match_info = ""
+            priority_badge = ""
+            
             if 'match_score' in scheme:
                 match_info = f" ({scheme['match_score']}% match)"
+                # Add priority indicator for high matches
+                if scheme['match_score'] > 90:
+                    priority_badge = "🔥 **HIGHLY RECOMMENDED FOR YOU** | "
+                elif scheme['match_score'] > 80:
+                    priority_badge = "⭐ **GREAT MATCH** | "
+            
             if 'match_reason' in scheme:
                 match_info += f" - {scheme['match_reason']}"
             
-            with st.expander(f"⭐ {scheme['name']} - {scheme['benefit']}{match_info}"):
+            # Check for deadline urgency
+            if scheme.get('deadline') and scheme['deadline'] != 'Open':
+                if any(month in scheme['deadline'] for month in ['March', 'April', 'May']):
+                    priority_badge = "⏰ **DEADLINE SOON** | " + priority_badge
+            
+            with st.expander(f"{priority_badge}⭐ {scheme['name']} - {scheme['benefit']}{match_info}"):
                 st.markdown(f"**Full Name:** {scheme['full_name']}")
                 st.markdown(f"**Benefit:** {scheme['benefit']}")
                 st.markdown(f"**Eligibility:** {scheme['eligibility']}")
@@ -1307,18 +1420,23 @@ Me: "Excellent! \u2705 Ab main aapke liye schemes dhundh raha hoon..."
                     if st.button(f"📝 Apply Guide", key=f"guide_{scheme['name']}", use_container_width=True):
                         st.session_state.messages.append({
                             'role': 'user',
-                            'content': f"I want to apply for {scheme['name']}. Please give me step-by-step guidance."
+                            'content': f"How to apply for {scheme['name']}? Please give me complete step-by-step guidance with all 5 steps."
                         })
                         st.rerun()
                 
                 with col2:
-                    if st.button(f"📄 Documents", key=f"docs_{scheme['name']}", use_container_width=True):
-                        st.info(f"**Required Documents:**\n" + "\n".join([f"✓ {doc}" for doc in scheme['documents']]))
+                    if st.button(f"🚀 Quick Apply", key=f"apply_{scheme['name']}", use_container_width=True):
+                        st.markdown(f"**Opening {scheme['name']} portal...**")
+                        st.markdown(f"### [🔗 Click here to apply now]({scheme['apply_link']})")
+                        st.info("💡 **Quick Tip**: Keep these ready before applying:\n- Aadhar Card\n- Bank Account details\n- Mobile number for OTP")
+                        st.success("✅ Portal opened! Need help? Click 'Apply Guide' for step-by-step instructions.")
                 
                 with col3:
-                    if st.button(f"🔗 Open Portal", key=f"link_{scheme['name']}", use_container_width=True):
-                        st.markdown(f"**Application Link:** [{scheme['apply_link']}]({scheme['apply_link']})")
-                        st.success("💡 Tip: Ask me for help if you get stuck!")
+                    if st.button(f"📄 Documents", key=f"docs_{scheme['name']}", use_container_width=True):
+                        st.markdown("### ✅ Required Documents Checklist")
+                        for doc in scheme['documents']:
+                            st.markdown(f"✓ {doc}")
+                        st.info("💡 Tip: Keep all documents in PDF/JPG format, max 2MB each")
     
     
     st.markdown('</div>', unsafe_allow_html=True)

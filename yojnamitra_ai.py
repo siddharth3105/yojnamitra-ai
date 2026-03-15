@@ -22,6 +22,7 @@ import logging
 from typing import Dict, List
 import requests
 from bs4 import BeautifulSoup
+import pandas as pd
 
 # Import authentication components
 from auth_components import SessionManager, render_auth_page
@@ -382,6 +383,15 @@ if 'notifications' not in st.session_state:
     st.session_state.notifications = []
 if 'selected_language' not in st.session_state:
     st.session_state.selected_language = 'English/Hindi/Hinglish (Auto)'
+# NEW: Enhanced session state for improvements
+if 'saved_schemes' not in st.session_state:
+    st.session_state.saved_schemes = []
+if 'applications' not in st.session_state:
+    st.session_state.applications = []
+if 'comparison_mode' not in st.session_state:
+    st.session_state.comparison_mode = False
+if 'schemes_to_compare' not in st.session_state:
+    st.session_state.schemes_to_compare = []
 
 
 # Language translation function using Amazon Translate
@@ -1262,6 +1272,24 @@ def main():
         
         st.markdown("---")
         
+        # Quick Stats Dashboard
+        st.markdown("### 📊 Your Dashboard")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            schemes_found = len(st.session_state.matched_schemes)
+            st.metric("Schemes Found", schemes_found, delta=None)
+        with col2:
+            saved_count = len(st.session_state.saved_schemes)
+            st.metric("Saved", saved_count, delta=None)
+        
+        if st.session_state.matched_schemes:
+            avg_match = sum(s.get('match_score', 0) for s in st.session_state.matched_schemes[:5]) / min(5, len(st.session_state.matched_schemes))
+            st.progress(avg_match / 100)
+            st.caption(f"Average Match: {avg_match:.0f}%")
+        
+        st.markdown("---")
+        
         # Progress Bar - Show profile completion
         st.markdown("### 📊 Profile Progress")
         fields_collected = sum([1 for k in ['name', 'age', 'state', 'income', 'occupation'] 
@@ -1324,6 +1352,51 @@ def main():
             A: Just ask me in the chat! I am here to help 24/7.
             """)
         
+        # Pro Tips Section
+        with st.expander("💡 Pro Tips"):
+            st.markdown("""
+            **Before Applying:**
+            - ✅ Keep Aadhar card ready
+            - ✅ Have bank account details handy
+            - ✅ Scan all documents (PDF/JPG, max 2MB)
+            - ✅ Use a valid mobile number for OTP
+            
+            **During Application:**
+            - ✅ Fill all mandatory fields (marked with *)
+            - ✅ Double-check Aadhar number
+            - ✅ Match details exactly with Aadhar
+            - ✅ Save application ID after submission
+            
+            **After Submission:**
+            - ✅ Take screenshot of confirmation
+            - ✅ Note down application ID
+            - ✅ Check email/SMS for confirmation
+            - ✅ Track status using provided link
+            """)
+        
+        st.markdown("---")
+        
+        # Saved Schemes Section
+        st.markdown("### 💾 Saved Schemes")
+        if st.session_state.saved_schemes:
+            for idx, scheme in enumerate(st.session_state.saved_schemes):
+                with st.expander(f"📌 {scheme['name']}", expanded=False):
+                    st.caption(scheme['benefit'])
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("📝 Apply", key=f"saved_apply_{idx}", use_container_width=True):
+                            st.session_state.messages.append({
+                                'role': 'user',
+                                'content': f"How to apply for {scheme['name']}? Please give me complete step-by-step guidance with all 5 steps."
+                            })
+                            st.rerun()
+                    with col2:
+                        if st.button("🗑️ Remove", key=f"saved_remove_{idx}", use_container_width=True):
+                            st.session_state.saved_schemes.pop(idx)
+                            st.rerun()
+        else:
+            st.caption("No saved schemes yet. Click 💾 Save on any scheme to bookmark it.")
+        
         st.markdown("---")
         
         # Notifications
@@ -1344,6 +1417,43 @@ def main():
     
     # Chat Container
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    
+    # Quick Action Bar (if profile is complete)
+    if all([st.session_state.user_profile.get(k) for k in ['name', 'age', 'state', 'income', 'occupation']]):
+        st.markdown("### ⚡ Quick Actions")
+        qcol1, qcol2, qcol3, qcol4 = st.columns(4)
+        
+        with qcol1:
+            if st.button("🔍 Find More Schemes", use_container_width=True):
+                st.session_state.messages.append({
+                    'role': 'user',
+                    'content': "Show me more schemes I'm eligible for"
+                })
+                st.rerun()
+        
+        with qcol2:
+            if st.button("💾 View Saved", use_container_width=True):
+                if st.session_state.saved_schemes:
+                    st.info(f"You have {len(st.session_state.saved_schemes)} saved schemes. Check sidebar!")
+                else:
+                    st.warning("No saved schemes yet. Click 💾 Save on any scheme.")
+        
+        with qcol3:
+            if st.button("📊 Compare Schemes", use_container_width=True):
+                if len(st.session_state.matched_schemes) >= 2:
+                    st.info("Scroll down to see comparison section!")
+                else:
+                    st.warning("Need at least 2 schemes to compare.")
+        
+        with qcol4:
+            if st.button("❓ Get Help", use_container_width=True):
+                st.session_state.messages.append({
+                    'role': 'user',
+                    'content': "I need help understanding how to apply for schemes"
+                })
+                st.rerun()
+        
+        st.markdown("---")
     
     # Display messages
     if not st.session_state.messages:
@@ -1414,7 +1524,7 @@ Aapka naam kya hai?"""
                 st.markdown("---")
                 st.markdown("### 🚀 Quick Actions")
                 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     if st.button(f"📝 Apply Guide", key=f"guide_{scheme['name']}", use_container_width=True):
@@ -1432,11 +1542,80 @@ Aapka naam kya hai?"""
                         st.success("✅ Portal opened! Need help? Click 'Apply Guide' for step-by-step instructions.")
                 
                 with col3:
+                    # Check if already saved
+                    is_saved = any(s['name'] == scheme['name'] for s in st.session_state.saved_schemes)
+                    if is_saved:
+                        st.button(f"✅ Saved", key=f"saved_{scheme['name']}", use_container_width=True, disabled=True)
+                    else:
+                        if st.button(f"💾 Save", key=f"save_{scheme['name']}", use_container_width=True):
+                            st.session_state.saved_schemes.append(scheme)
+                            st.success(f"✅ {scheme['name']} saved!")
+                            st.rerun()
+                
+                with col4:
                     if st.button(f"📄 Documents", key=f"docs_{scheme['name']}", use_container_width=True):
                         st.markdown("### ✅ Required Documents Checklist")
                         for doc in scheme['documents']:
                             st.markdown(f"✓ {doc}")
                         st.info("💡 Tip: Keep all documents in PDF/JPG format, max 2MB each")
+    
+    # Scheme Comparison Feature
+    if len(st.session_state.matched_schemes) >= 2:
+        st.markdown("---")
+        st.markdown("### 📊 Compare Schemes")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info("💡 Select 2-3 schemes to compare side-by-side")
+        with col2:
+            if st.button("🔄 Clear Selection", use_container_width=True):
+                st.session_state.schemes_to_compare = []
+                st.rerun()
+        
+        # Scheme selection for comparison
+        comparison_cols = st.columns(min(3, len(st.session_state.matched_schemes)))
+        for idx, col in enumerate(comparison_cols):
+            if idx < len(st.session_state.matched_schemes):
+                scheme = st.session_state.matched_schemes[idx]
+                with col:
+                    is_selected = scheme['name'] in st.session_state.schemes_to_compare
+                    if st.checkbox(f"{scheme['name']}", value=is_selected, key=f"compare_{idx}"):
+                        if scheme['name'] not in st.session_state.schemes_to_compare:
+                            st.session_state.schemes_to_compare.append(scheme['name'])
+                    else:
+                        if scheme['name'] in st.session_state.schemes_to_compare:
+                            st.session_state.schemes_to_compare.remove(scheme['name'])
+        
+        # Show comparison table
+        if len(st.session_state.schemes_to_compare) >= 2:
+            st.markdown("### 📋 Comparison Table")
+            
+            comparison_data = []
+            for scheme_name in st.session_state.schemes_to_compare:
+                scheme = next((s for s in st.session_state.matched_schemes if s['name'] == scheme_name), None)
+                if scheme:
+                    comparison_data.append({
+                        'Scheme': scheme['name'],
+                        'Benefit': scheme['benefit'],
+                        'Match': f"{scheme.get('match_score', 0)}%",
+                        'Deadline': scheme['deadline'],
+                        'Documents': len(scheme['documents'])
+                    })
+            
+            if comparison_data:
+                import pandas as pd
+                df = pd.DataFrame(comparison_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                
+                # Download comparison
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Comparison (CSV)",
+                    data=csv,
+                    file_name="scheme_comparison.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
     
     
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1453,19 +1632,28 @@ Aapka naam kya hai?"""
                 # Extract profile info
                 st.session_state.user_profile = extract_profile_info(last_user_msg, st.session_state.user_profile)
                 
-                # Get AI response
-                with st.spinner("🤖 YojnaMitra-AI is thinking..."):
-                    ai_response = ai.get_response(
-                        last_user_msg,
-                        st.session_state.user_profile,
-                        st.session_state.messages
-                    )
-                
-                # Add AI response
-                st.session_state.messages.append({
-                    'role': 'assistant',
-                    'content': ai_response
-                })
+                # Get AI response with better error handling
+                try:
+                    with st.spinner("🤖 YojnaMitra-AI is thinking..."):
+                        ai_response = ai.get_response(
+                            last_user_msg,
+                            st.session_state.user_profile,
+                            st.session_state.messages
+                        )
+                    
+                    # Add AI response
+                    st.session_state.messages.append({
+                        'role': 'assistant',
+                        'content': ai_response
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"Error getting AI response: {e}")
+                    st.session_state.messages.append({
+                        'role': 'assistant',
+                        'content': "I apologize, I'm having trouble processing your request. Let me try to help you differently. Could you please rephrase your question?"
+                    })
+                    st.error("⚠️ Temporary issue with AI. Please try again.")
                 
                 # Check if profile is complete and search schemes
                 profile = st.session_state.user_profile

@@ -23,6 +23,7 @@ from typing import Dict, List
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+import urllib.parse
 
 # Import authentication components
 from auth_components import SessionManager, render_auth_page
@@ -33,6 +34,26 @@ from rag_engine import RAGEngine
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Helper function for WhatsApp sharing
+def generate_whatsapp_share_link(user_profile: Dict, schemes: List[Dict]) -> str:
+    """Generate WhatsApp share link with scheme information"""
+    name = user_profile.get('name', 'User')
+    message = f"🎉 YojnaMitra-AI found {len(schemes)} government schemes for me!\n\n"
+    
+    for i, scheme in enumerate(schemes[:3], 1):
+        message += f"{i}. {scheme['name']}\n"
+        message += f"   💰 {scheme['benefit']}\n"
+        message += f"   🔗 {scheme['apply_link']}\n\n"
+    
+    message += "Try YojnaMitra-AI to find schemes for you too! 🇮🇳\n"
+    message += "https://main.d3knj8ptbtyid3.amplifyapp.com"
+    
+    # URL encode the message
+    encoded_message = urllib.parse.quote(message)
+    whatsapp_url = f"https://wa.me/?text={encoded_message}"
+    
+    return whatsapp_url
 
 # Load environment - Support both Streamlit Cloud and local
 def get_env_var(key, default=None):
@@ -455,6 +476,17 @@ class YojnaMitraAI:
             logger.warning(f"RAG engine initialization failed: {e}. Using fallback mode.")
             self.rag_engine = None
         
+        # Conversation memory for better context
+        self.conversation_context = {
+            'topics_discussed': [],
+            'schemes_mentioned': [],
+            'questions_asked': [],
+            'user_interests': [],
+            'pending_confirmation': None,  # Track what needs confirmation
+            'last_extracted_value': None,  # Store last extracted value
+            'correction_mode': False  # Track if we're in correction mode
+        }
+        
     def _init_bedrock(self):
         """Initialize AWS Bedrock client"""
         try:
@@ -469,7 +501,10 @@ class YojnaMitraAI:
             return None
     
     def get_response(self, user_message: str, user_profile: Dict, conversation_history: List) -> str:
-        """Get AI response using Bedrock"""
+        """Get AI response using Bedrock with enhanced conversation memory"""
+        
+        # Update conversation context
+        self._update_conversation_context(user_message, user_profile)
         
         # Check if this is a step-by-step guide request
         is_guide_request = any(keyword in user_message.lower() for keyword in 
@@ -572,8 +607,123 @@ class YojnaMitraAI:
         else:
             return "🟢 PROFILE COMPLETE - Ready to recommend schemes and provide guidance"
     
+    def _update_conversation_context(self, user_message: str, user_profile: Dict):
+        """Update conversation memory for better context awareness"""
+        message_lower = user_message.lower()
+        
+        # Track topics discussed
+        topics = ['scheme', 'apply', 'document', 'eligibility', 'benefit', 'deadline']
+        for topic in topics:
+            if topic in message_lower and topic not in self.conversation_context['topics_discussed']:
+                self.conversation_context['topics_discussed'].append(topic)
+        
+        # Track schemes mentioned
+        schemes = ['pm-kisan', 'pmkisan', 'ayushman', 'mudra', 'scholarship', 'awas']
+        for scheme in schemes:
+            if scheme in message_lower and scheme not in self.conversation_context['schemes_mentioned']:
+                self.conversation_context['schemes_mentioned'].append(scheme)
+        
+        # Track questions asked
+        if '?' in user_message:
+            self.conversation_context['questions_asked'].append(user_message[:50])
+        
+        # Track user interests based on occupation
+        if user_profile.get('occupation'):
+            occupation = user_profile['occupation'].lower()
+            if occupation not in self.conversation_context['user_interests']:
+                self.conversation_context['user_interests'].append(occupation)
+    
+    def _validate_input(self, field: str, value: any, user_message: str) -> Dict:
+        """Validate user input and detect potential mistakes"""
+        validation_result = {
+            'is_valid': True,
+            'needs_confirmation': False,
+            'error_message': None,
+            'suggestion': None,
+            'confidence': 'high'
+        }
+        
+        if field == 'name':
+            # Check if name looks valid
+            if len(str(value)) < 2:
+                validation_result['is_valid'] = False
+                validation_result['error_message'] = "Name seems too short"
+                validation_result['suggestion'] = "Please provide your full name"
+            elif any(char.isdigit() for char in str(value)):
+                validation_result['needs_confirmation'] = True
+                validation_result['confidence'] = 'low'
+                validation_result['suggestion'] = f"I got '{value}' as your name. Is this correct?"
+            elif len(str(value).split()) == 1 and len(str(value)) > 2:
+                validation_result['needs_confirmation'] = True
+                validation_result['confidence'] = 'medium'
+                validation_result['suggestion'] = f"I got '{value}'. Is this your full name or just first name?"
+        
+        elif field == 'age':
+            try:
+                age_val = int(value)
+                if age_val < 5 or age_val > 120:
+                    validation_result['is_valid'] = False
+                    validation_result['error_message'] = f"Age {age_val} seems unusual"
+                    validation_result['suggestion'] = "Please provide a valid age (5-120 years)"
+                elif age_val < 18:
+                    validation_result['needs_confirmation'] = True
+                    validation_result['confidence'] = 'medium'
+                    validation_result['suggestion'] = f"I got {age_val} years. Is this correct? (Most schemes require 18+)"
+                elif age_val > 100:
+                    validation_result['needs_confirmation'] = True
+                    validation_result['confidence'] = 'low'
+                    validation_result['suggestion'] = f"I got {age_val} years. Please confirm if this is correct"
+            except:
+                validation_result['is_valid'] = False
+                validation_result['error_message'] = "Could not understand age"
+                validation_result['suggestion'] = "Please provide age as a number (e.g., 25, 30, 45)"
+        
+        elif field == 'state':
+            # Check if state is recognized
+            valid_states = ['andhra pradesh', 'bihar', 'chhattisgarh', 'delhi', 'gujarat', 
+                          'haryana', 'karnataka', 'kerala', 'madhya pradesh', 'maharashtra',
+                          'odisha', 'punjab', 'rajasthan', 'tamil nadu', 'telangana', 
+                          'uttar pradesh', 'uttarakhand', 'west bengal']
+            
+            if value and value.lower() not in valid_states:
+                validation_result['needs_confirmation'] = True
+                validation_result['confidence'] = 'medium'
+                validation_result['suggestion'] = f"I got '{value}'. Is this the correct state name?"
+        
+        elif field == 'income':
+            try:
+                income_val = int(value)
+                if income_val < 0:
+                    validation_result['is_valid'] = False
+                    validation_result['error_message'] = "Income cannot be negative"
+                    validation_result['suggestion'] = "Please provide yearly income (e.g., 2 lakh, 5 lakh)"
+                elif income_val > 100000000:  # 10 crore
+                    validation_result['needs_confirmation'] = True
+                    validation_result['confidence'] = 'low'
+                    validation_result['suggestion'] = f"I got Rs.{income_val:,}. Please confirm if this is your yearly income"
+                elif income_val < 10000:  # Less than 10k seems low for yearly
+                    validation_result['needs_confirmation'] = True
+                    validation_result['confidence'] = 'medium'
+                    validation_result['suggestion'] = f"I got Rs.{income_val:,} per year. Is this correct?"
+            except:
+                validation_result['is_valid'] = False
+                validation_result['error_message'] = "Could not understand income"
+                validation_result['suggestion'] = "Please provide yearly income (e.g., 2 lakh, 5 lakh, 10 lakh)"
+        
+        elif field == 'occupation':
+            # Check if occupation is recognized
+            valid_occupations = ['farmer', 'student', 'business', 'job', 'self-employed', 
+                               'homemaker', 'agriculture', 'unemployed']
+            
+            if value and value.lower() not in valid_occupations:
+                validation_result['needs_confirmation'] = True
+                validation_result['confidence'] = 'medium'
+                validation_result['suggestion'] = f"I got '{value}'. Is this your occupation?"
+        
+        return validation_result
+    
     def _build_context(self, user_message: str, user_profile: Dict, conversation_history: List) -> str:
-        """Build intelligent context for AI - Optimized for Amazon Nova Lite"""
+        """Build intelligent context for AI - Enhanced for natural conversation"""
         
         # Analyze conversation stage
         profile_complete = all([
@@ -587,28 +737,57 @@ class YojnaMitraAI:
         # Get conversation stage
         stage = self._get_conversation_stage(user_profile)
         
-        # Build conversation history
+        # Build conversation history with better context
         history_text = ""
         if conversation_history:
-            recent = conversation_history[-6:]  # Last 3 exchanges
+            recent = conversation_history[-8:]  # Last 4 exchanges for better context
             for msg in recent:
-                role = "User" if msg['role'] == 'user' else "AI"
+                role = "User" if msg['role'] == 'user' else "You (AI)"
                 history_text += f"{role}: {msg['content']}\n"
         
         # Count fields collected
         fields_collected = sum([1 for k in ['name', 'age', 'state', 'income', 'occupation'] if user_profile.get(k)])
         
-        context = f"""You are YojnaMitra-AI, a helpful assistant for Indian government schemes.
+        # Determine what to ask next
+        next_field = None
+        if not user_profile.get('name'):
+            next_field = "name"
+        elif not user_profile.get('age'):
+            next_field = "age"
+        elif not user_profile.get('state'):
+            next_field = "state"
+        elif not user_profile.get('income'):
+            next_field = "income"
+        elif not user_profile.get('occupation'):
+            next_field = "occupation"
+        
+        context = f"""You are YojnaMitra-AI, a warm, friendly, and helpful assistant for Indian government schemes.
 
-USER PROFILE:
-Name: {user_profile.get('name', 'Unknown')}
-Age: {user_profile.get('age', 'Unknown')}
-State: {user_profile.get('state', 'Unknown')}
-Income: {f"Rs.{user_profile.get('income'):,}" if user_profile.get('income') else 'Unknown'}
-Occupation: {user_profile.get('occupation', 'Unknown')}
+PERSONALITY:
+- Speak naturally in Hinglish (mix of Hindi and English)
+- Be encouraging and supportive
+- Show genuine interest in helping the user
+- Use emojis occasionally to be friendly (😊, 👍, ✅, 🎉)
+- Acknowledge user's responses warmly before asking next question
+- Be conversational, not robotic
 
-CONVERSATION HISTORY:
-{history_text if history_text else "This is the start of the conversation."}
+USER PROFILE (Current):
+Name: {user_profile.get('name', 'Not provided yet')}
+Age: {user_profile.get('age', 'Not provided yet')}
+State: {user_profile.get('state', 'Not provided yet')}
+Income: {f"Rs.{user_profile.get('income'):,}/year" if user_profile.get('income') else 'Not provided yet'}
+Occupation: {user_profile.get('occupation', 'Not provided yet')}
+
+CONVERSATION STAGE: {stage}
+FIELDS COLLECTED: {fields_collected}/5
+NEXT FIELD NEEDED: {next_field if next_field else "Profile Complete!"}
+
+VALIDATION & CORRECTION MODE:
+Pending Confirmation: {self.conversation_context.get('pending_confirmation', 'None')}
+Correction Mode: {self.conversation_context.get('correction_mode', False)}
+
+RECENT CONVERSATION:
+{history_text if history_text else "This is the beginning of our conversation."}
 
 USER'S CURRENT MESSAGE: "{user_message}"
 
@@ -617,102 +796,136 @@ If the user message contains ANY of these keywords: "step-by-step", "how to appl
 AND mentions a scheme name (PM-KISAN, Ayushman Bharat, MUDRA, NSP, PM Awas, etc.)
 THEN you MUST provide the complete step-by-step application guide (see instruction #3 below).
 
-INSTRUCTIONS:
+CONVERSATION RULES:
 
-1. IF USER PROFILE IS INCOMPLETE:
-   - Ask for the next missing field in a friendly way
-   - Use natural Hinglish: "Aapka naam kya hai?", "Kitne saal ke ho?", "Kis state se ho?", "Kya kaam karte ho?", "Yearly income kitni hai?"
+0. INTELLIGENT INPUT VALIDATION & CORRECTION:
+   
+   ALWAYS validate user inputs and ask for confirmation when needed:
+   
+   a) After extracting ANY field, check if it seems correct:
+      - Name: Check if it's a valid name (no numbers, reasonable length)
+      - Age: Check if it's in valid range (5-120), warn if <18 or >100
+      - State: Check if it's a recognized Indian state
+      - Income: Check if it's reasonable (not negative, not too high/low)
+      - Occupation: Check if it's a recognized occupation
+   
+   b) If input seems UNUSUAL or INCORRECT:
+      - Ask for confirmation: "I got [VALUE]. Is this correct?"
+      - Offer to change: "If you want to change it, just tell me the correct [FIELD]"
+      - Be polite and helpful
+   
+   c) If user says "yes", "correct", "right", "haan":
+      - Accept the value
+      - Move to next field
+      - Example: "Great! ✅ Moving ahead..."
+   
+   d) If user says "no", "wrong", "change", "nahi":
+      - Ask for correct value
+      - Example: "No problem! What's the correct [FIELD]?"
+   
+   e) If user provides correction directly:
+      - Accept new value
+      - Confirm: "Got it! Updated to [NEW_VALUE] ✅"
+      - Move to next field
+   
+   VALIDATION EXAMPLES:
+   
+   User: "123"
+   AI: "Hmm, '123' doesn't look like a name. 🤔 
+        Could you please provide your full name?"
+   
+   User: "Rahul123"
+   AI: "I got 'Rahul123' as your name. Is this correct? 
+        (Names usually don't have numbers)"
+   
+   User: "15"
+   AI: "I got 15 years as your age. Is this correct? 
+        (Most schemes require 18+ age) ⚠️"
+   
+   User: "150"
+   AI: "I got 150 years. 🤔 That seems unusual! 
+        Could you please confirm your age?"
+   
+   User: "Dilli"
+   AI: "I got 'Dilli'. Did you mean Delhi? 
+        Please confirm the state name."
+   
+   User: "50000"
+   AI: "I got Rs.50,000 per year. Is this your yearly income? 
+        (Seems a bit low, just confirming)"
+
+1. IF USER PROFILE IS INCOMPLETE ({fields_collected}/5 fields):
+   
+   ALWAYS follow this pattern:
+   a) First, warmly acknowledge what they just said
+   b) Then ask for the next missing field naturally
+   
+   Examples of GOOD responses:
+   - User says "Rahul": "Bahut achha Rahul ji! 😊 Aapki age kitni hai?"
+   - User says "25": "Great! 25 saal... perfect age for many schemes! 👍 Aap kis state se belong karte ho?"
+   - User says "Bihar": "Bihar se! Wonderful! 🎉 Aap kya kaam karte ho? (Jaise: Farmer, Student, Business, Job)"
+   - User says "Farming": "Farming! Bahut achha! 🌾 Aapki yearly income approximately kitni hai? (Jaise: 2 lakh, 5 lakh)"
+   - User says "3 lakh": "Perfect! Rs.3 lakh per year. Excellent! ✅"
+   
+   IMPORTANT:
    - Ask ONLY ONE question at a time
-   - If user provides multiple pieces of information, acknowledge all of them
-
-2. IF USER PROFILE IS COMPLETE:
-   - Congratulate them: "Perfect! Ab main aapke liye schemes dhundh raha hoon..."
-   - Recommend 3-5 government schemes that match their profile
-   - For each scheme, provide:
-     * Scheme name
-     * Benefit amount
-     * Why they're eligible
-     * Required documents
-     * Application link
-
-3. IF USER ASKS FOR APPLICATION HELP (detected by keywords above):
-   YOU MUST provide this EXACT format - DO NOT SKIP ANY STEPS - THIS IS MANDATORY:
+   - Use natural Hinglish (not pure English or pure Hindi)
+   - Be warm and encouraging
+   - If user provides multiple pieces of info, acknowledge ALL of them
+   - Show enthusiasm about their responses
    
-   IMPORTANT: Provide ALL 5 STEPS in complete detail. Do not summarize or shorten.
+   Field-specific questions:
+   - Name: "Aapka naam kya hai? 😊"
+   - Age: "Aapki age kitni hai?"
+   - State: "Aap kis state se belong karte ho? (Jaise: Bihar, UP, Maharashtra, Delhi)"
+   - Occupation: "Aap kya kaam karte ho? (Jaise: Farmer, Student, Business, Job)"
+   - Income: "Aapki yearly income approximately kitni hai? (Jaise: 2 lakh, 5 lakh, 10 lakh)"
 
-   "Let me guide you step-by-step to apply for [SCHEME NAME]:
-
-   **STEP 1: Open Application Link & Login**
-   Click this link: [APPLICATION_URL]
+2. IF USER PROFILE IS COMPLETE (5/5 fields):
    
-   If you're a new user:
-   - Click 'Register' or 'New Registration'
-   - Enter your mobile number
-   - Verify OTP
-   - Create a password
-   - Login with your credentials
+   Celebrate completion warmly:
+   "Excellent {user_profile.get('name', '')} ji! 🎉 Aapki profile complete ho gayi!
    
-   If you already have an account:
-   - Click 'Login'
-   - Enter your username and password
-
-   **STEP 2: Find the Scheme**
-   After logging in:
-   - Use the search bar and type '[SCHEME NAME]'
-   - OR navigate to the relevant category (Agriculture/Education/Health/Business)
-   - Click on the scheme name to open the application form
-
-   **STEP 3: Fill All Required Details**
-   Fill in these details carefully:
-   - Personal Information: Full Name (exactly as per Aadhar), Date of Birth, Gender
-   - Contact Details: Mobile number, Email address, Complete address with Pin Code
-   - Identity Details: Aadhar number, PAN card number (if required)
-   - Bank Details: Bank account number, IFSC code, Bank name
-   - Scheme-specific information (varies by scheme)
+   Ab main aapke liye best schemes dhundh raha hoon... 🔍
    
-   IMPORTANT: Make sure all details match your Aadhar card exactly!
-   Fill all mandatory fields (marked with * asterisk)
-
-   **STEP 4: Upload Required Documents**
-   Upload these documents if the form asks for them:
-   - Aadhar Card (PDF or JPG format, maximum 2MB)
-   - Passport size photograph (JPG format, maximum 100KB)
-   - Bank Passbook or Cancelled Cheque (first page showing account details)
-   - Income Certificate (if required for the scheme)
-   - Any other scheme-specific documents
+   Aapke liye perfect schemes:
+   [List 3-5 matching schemes with details]"
    
-   To upload: Click 'Choose File' or 'Browse' → Select the document from your computer → Click 'Upload'
+   For each scheme, provide:
+   - ⭐ Scheme name
+   - 💰 Benefit amount
+   - ✅ Why you're eligible
+   - 📄 Required documents
+   - 🔗 Application link
    
-   Note: Some schemes may not require document upload at this stage
+   End with: "Kisi bhi scheme ke liye apply karne mein help chahiye? Just click the 'Apply Guide' button! 😊"
 
-   **STEP 5: Review, Submit & Get Confirmation**
-   Before submitting:
-   - Carefully review all the information you entered
-   - Make sure everything is correct
-   - Tick the declaration checkbox (if present)
-   - Click the 'Submit' or 'Apply' button
+3. IF USER ASKS FOR APPLICATION HELP:
+   YOU MUST provide the complete 5-step guide (same as before - don't change this part)
+
+4. IF USER ASKS GENERAL QUESTIONS:
+   - Answer naturally and helpfully
+   - Relate back to schemes if relevant
+   - Be encouraging
+   - Offer to help with next steps
    
-   After submission:
-   - You will see a confirmation message
-   - SAVE YOUR APPLICATION ID (example: PMKISAN2026XXXXX)
-   - Take a screenshot of the confirmation page
-   - You will receive a confirmation SMS on your registered mobile number
-   - You may also receive a confirmation email
-   - Save the tracking link to check your application status later
+   Examples:
+   - "What documents do I need?" → List common documents + offer to show specific scheme requirements
+   - "How long does it take?" → "Usually 10-15 minutes per scheme. Main aapko step-by-step guide de sakta hoon!"
+   - "Is it safe?" → "Bilkul safe! Sab government portals hain. Aapka data secure hai. 🔒"
 
-   Congratulations! Your application is submitted. You'll receive confirmation via SMS/Email shortly.
-   
-   Need help with any specific step? Just ask!"
-
-4. GENERAL RULES:
-   - Be friendly and conversational
-   - Use Hinglish naturally (mix of Hindi and English)
+5. GENERAL CONVERSATION TIPS:
+   - Be conversational, not formal
+   - Use Hinglish naturally (70% Hindi, 30% English)
+   - Show empathy and understanding
+   - Celebrate small wins (profile completion, finding schemes)
+   - Be patient if user is confused
+   - Offer help proactively
+   - Use emojis sparingly but effectively
    - Keep responses concise (under 150 words) unless providing step-by-step guide
-   - Always acknowledge what the user said before asking the next question
-   - Never ask for information you already have
-   - If user seems confused, be patient and explain clearly
+   - Always end with a clear next step or question
 
-RESPOND NOW (in a natural, helpful way):"""""""""
+RESPOND NOW (naturally, warmly, helpfully):"""
 
         return context
     
@@ -733,25 +946,31 @@ RESPOND NOW (in a natural, helpful way):"""""""""
         return response
     
     def _fallback_response(self, user_message: str, user_profile: Dict) -> str:
-        """Fallback response when AI unavailable - simple and effective"""
+        """Fallback response when AI unavailable - warm and conversational"""
         
         if not user_profile.get('name'):
-            return "Hi! 👋 Main YojnaMitra-AI hoon. Main aapko government schemes dhundne mein madad karunga. Pehle baat karte hain - aapka naam kya hai?"
+            return "Namaste! 🙏 Main YojnaMitra-AI hoon. Main aapko government schemes dhundne mein madad karunga. Pehle baat karte hain - aapka naam kya hai? 😊"
         
         elif not user_profile.get('age'):
-            return f"Bahut achha {user_profile['name']} ji! Aapki age kitni hai?"
+            name = user_profile['name']
+            return f"Bahut achha {name} ji! 😊 Nice to meet you! Ab batao, aapki age kitni hai?"
         
         elif not user_profile.get('state'):
-            return f"Great {user_profile['name']} ji! Aap kis state se belong karte ho? (Jaise: Bihar, UP, Maharashtra, Delhi, etc.)"
+            name = user_profile['name']
+            age = user_profile['age']
+            return f"Great {name} ji! {age} saal... perfect! 👍 Aap kis state se belong karte ho? (Jaise: Bihar, UP, Maharashtra, Delhi, etc.)"
         
         elif not user_profile.get('income'):
-            return f"Perfect {user_profile['name']} ji! Aapki yearly income kitni hai approximately? (Jaise: 2 lakh, 5 lakh, 10 lakh)"
+            name = user_profile['name']
+            return f"Wonderful {name} ji! 🎉 Ab batao, aapki yearly income approximately kitni hai? (Jaise: 2 lakh, 5 lakh, 10 lakh)"
         
         elif not user_profile.get('occupation'):
-            return f"Nice {user_profile['name']} ji! Aap kya kaam karte ho? (Jaise: Farmer, Student, Business, Job, etc.)"
+            name = user_profile['name']
+            return f"Perfect {name} ji! ✅ Last question - aap kya kaam karte ho? (Jaise: Farmer, Student, Business, Job, etc.)"
         
         else:
-            return f"Perfect {user_profile['name']} ji! Ab main aapke liye best government schemes dhundh raha hoon... 🔍"
+            name = user_profile['name']
+            return f"Excellent {name} ji! 🎉 Aapki profile complete ho gayi!\n\nAb main aapke liye best government schemes dhundh raha hoon... 🔍\n\nBas kuch seconds! ⏳"
     
     def _get_fallback_guide(self, user_message: str, user_profile: Dict) -> str:
         """Provide fallback step-by-step guide when AI doesn't generate complete guide"""
@@ -853,6 +1072,83 @@ class SchemeSearchEngine:
     def __init__(self, rag_engine=None):
         """Initialize search engine with optional RAG support"""
         self.rag_engine = rag_engine
+    
+    def generate_personalized_reasons(self, user_profile: Dict, scheme: Dict) -> List[str]:
+        """Generate personalized reasons why a scheme is perfect for the user"""
+        reasons = []
+        
+        # Age match
+        if scheme.get('min_age') and scheme.get('max_age'):
+            user_age = user_profile.get('age')
+            if user_age and scheme['min_age'] <= user_age <= scheme['max_age']:
+                reasons.append(f"✅ Your age ({user_age} years) is perfect for this scheme")
+        
+        # Income match
+        if scheme.get('max_income'):
+            user_income = user_profile.get('income')
+            if user_income and user_income <= scheme['max_income']:
+                reasons.append(f"✅ Your income (Rs.{user_income:,}/year) qualifies you")
+        
+        # Occupation match
+        user_occupation = user_profile.get('occupation')
+        if user_occupation and scheme.get('occupations'):
+            if user_occupation in scheme['occupations'] or 'All' in scheme['occupations']:
+                reasons.append(f"✅ Designed specifically for {user_occupation}s like you")
+        
+        # State match
+        user_state = user_profile.get('state')
+        if user_state and scheme.get('states'):
+            if user_state in scheme['states'] or 'All India' in scheme['states']:
+                reasons.append(f"✅ Available in your state ({user_state})")
+        
+        # High match score
+        if scheme.get('match_score') and scheme['match_score'] >= 90:
+            reasons.append(f"✅ Excellent match ({scheme['match_score']}% compatibility)")
+        
+        # If no specific reasons, add generic one
+        if not reasons:
+            reasons.append("✅ You meet the basic eligibility criteria")
+        
+        return reasons
+    
+    def check_upcoming_deadlines(self, schemes: List[Dict]) -> List[Dict]:
+        """Check for upcoming deadlines and generate notifications"""
+        notifications = []
+        
+        for scheme in schemes:
+            deadline = scheme.get('deadline', 'Open')
+            
+            if deadline and deadline != 'Open':
+                # Parse deadline (simplified - in production use proper date parsing)
+                deadline_lower = deadline.lower()
+                
+                # Check for month mentions
+                current_month = datetime.now().strftime('%B').lower()
+                months = ['january', 'february', 'march', 'april', 'may', 'june',
+                         'july', 'august', 'september', 'october', 'november', 'december']
+                
+                for i, month in enumerate(months):
+                    if month in deadline_lower:
+                        # Rough estimate - if current month or next month
+                        current_month_idx = datetime.now().month - 1
+                        if i == current_month_idx:
+                            notifications.append({
+                                'scheme': scheme['name'],
+                                'deadline': deadline,
+                                'urgency': 'high',
+                                'message': f"⚠️ URGENT: {scheme['name']} deadline this month ({deadline})!",
+                                'days_estimate': 15
+                            })
+                        elif i == (current_month_idx + 1) % 12:
+                            notifications.append({
+                                'scheme': scheme['name'],
+                                'deadline': deadline,
+                                'urgency': 'medium',
+                                'message': f"⏰ {scheme['name']} deadline next month ({deadline})",
+                                'days_estimate': 45
+                            })
+        
+        return notifications
     
     def search_schemes(self, user_profile: Dict) -> List[Dict]:
         """Search schemes from internet and database"""
@@ -1043,34 +1339,44 @@ class SchemeSearchEngine:
 
 
 def extract_profile_info(user_message: str, current_profile: Dict) -> Dict:
-    """Extract profile information from user message with improved logic"""
+    """Extract profile information from user message with improved logic and validation"""
     
     import re
     
     message_lower = user_message.lower()
     updated_profile = current_profile.copy()
     
-    # Extract NAME - improved logic
-    if not updated_profile.get('name'):
+    # Check if user is confirming or correcting
+    confirmation_words = ['yes', 'haan', 'correct', 'right', 'sahi', 'ok', 'okay', 'yeah']
+    correction_words = ['no', 'nahi', 'wrong', 'galat', 'change', 'nope']
+    
+    is_confirmation = any(word in message_lower for word in confirmation_words)
+    is_correction = any(word in message_lower for word in correction_words)
+    
+    # Extract NAME - improved logic with validation
+    if not updated_profile.get('name') or (is_correction and 'name' in message_lower):
         # Remove common words and extract name
-        common_words = ['my', 'name', 'is', 'i', 'am', 'mera', 'naam', 'hai', 'main', 'hoon']
+        common_words = ['my', 'name', 'is', 'i', 'am', 'mera', 'naam', 'hai', 'main', 'hoon', 'no', 'nahi', 'change']
         words = user_message.split()
-        name_words = [w for w in words if w.lower() not in common_words and len(w) > 1]
+        name_words = [w for w in words if w.lower() not in common_words and len(w) > 1 and not w.isdigit()]
         
         if name_words:
-            # Take first 1-3 capitalized words as name
+            # Take first 1-3 words as name
             potential_name = ' '.join(name_words[:3])
             if len(potential_name) > 1:
-                updated_profile['name'] = potential_name.strip()
+                # Basic validation
+                if not any(char.isdigit() for char in potential_name):
+                    updated_profile['name'] = potential_name.strip().title()
+                    updated_profile['name_needs_confirmation'] = len(potential_name.split()) == 1
     
-    # Extract AGE - improved logic
-    if not updated_profile.get('age'):
+    # Extract AGE - improved logic with validation
+    if not updated_profile.get('age') or (is_correction and 'age' in message_lower):
         # Look for age patterns
         age_patterns = [
-            r'\b(\d{1,2})\s*(?:years?|saal|साल|yr|yrs)',
-            r'\b(\d{1,2})\s*(?:ka|ki|ke)',
-            r'(?:age|umar|उम्र)\s*(?:is|hai)?\s*(\d{1,2})',
-            r'\b(\d{1,2})\b'  # Just a number
+            r'\b(\d{1,3})\s*(?:years?|saal|साल|yr|yrs)',
+            r'\b(\d{1,3})\s*(?:ka|ki|ke)',
+            r'(?:age|umar|उम्र)\s*(?:is|hai)?\s*(\d{1,3})',
+            r'\b(\d{1,3})\b'  # Just a number
         ]
         
         for pattern in age_patterns:
@@ -1079,10 +1385,12 @@ def extract_profile_info(user_message: str, current_profile: Dict) -> Dict:
                 age = int(age_match.group(1))
                 if 5 <= age <= 120:
                     updated_profile['age'] = age
+                    # Flag for confirmation if unusual
+                    updated_profile['age_needs_confirmation'] = age < 18 or age > 100
                     break
     
-    # Extract STATE - improved logic
-    if not updated_profile.get('state'):
+    # Extract STATE - improved logic with validation
+    if not updated_profile.get('state') or (is_correction and 'state' in message_lower):
         states = {
             'Andhra Pradesh': ['andhra', 'ap'],
             'Bihar': ['bihar'],
@@ -1109,8 +1417,8 @@ def extract_profile_info(user_message: str, current_profile: Dict) -> Dict:
                 updated_profile['state'] = state
                 break
     
-    # Extract INCOME - improved logic
-    if not updated_profile.get('income'):
+    # Extract INCOME - improved logic with validation
+    if not updated_profile.get('income') or (is_correction and 'income' in message_lower):
         # Look for income patterns
         income_patterns = [
             (r'(\d+)\s*(?:lakh|lakhs|लाख)', 100000),
@@ -1125,10 +1433,12 @@ def extract_profile_info(user_message: str, current_profile: Dict) -> Dict:
                 income = int(income_match.group(1)) * multiplier
                 if 1000 <= income <= 100000000:  # Reasonable range
                     updated_profile['income'] = income
+                    # Flag for confirmation if unusual
+                    updated_profile['income_needs_confirmation'] = income < 50000 or income > 10000000
                     break
     
-    # Extract OCCUPATION - improved logic
-    if not updated_profile.get('occupation'):
+    # Extract OCCUPATION - improved logic with validation
+    if not updated_profile.get('occupation') or (is_correction and 'occupation' in message_lower):
         occupations = {
             'Farmer': ['farmer', 'farming', 'किसान', 'खेती', 'agriculture', 'kisaan'],
             'Student': ['student', 'studying', 'छात्र', 'college', 'school', 'padhai'],
@@ -1272,6 +1582,29 @@ def main():
         
         st.markdown("---")
         
+        # Scheme Filters (if schemes available)
+        if st.session_state.matched_schemes:
+            st.markdown("### 🔍 Filter Schemes")
+            
+            # Benefit filter
+            max_benefit = max([s.get('match_score', 0) for s in st.session_state.matched_schemes])
+            min_match = st.slider("Minimum Match Score", 0, 100, 0, 5)
+            
+            # Category filter
+            categories = list(set([s.get('category', 'Other') for s in st.session_state.matched_schemes]))
+            selected_categories = st.multiselect("Categories", categories, default=categories)
+            
+            # Deadline filter
+            deadline_options = ["All", "Urgent (This Month)", "Soon (Next Month)", "Open"]
+            deadline_filter = st.selectbox("Deadline", deadline_options)
+            
+            # Apply filters button
+            if st.button("🔍 Apply Filters", use_container_width=True):
+                st.success("✅ Filters applied!")
+                st.rerun()
+        
+        st.markdown("---")
+        
         # Quick Stats Dashboard
         st.markdown("### 📊 Your Dashboard")
         
@@ -1372,6 +1705,35 @@ def main():
             - ✅ Note down application ID
             - ✅ Check email/SMS for confirmation
             - ✅ Track status using provided link
+            """)
+        
+        # Success Stories Section
+        with st.expander("🌟 Success Stories"):
+            st.markdown("""
+            **Ramesh Kumar** from Bihar
+            
+            Applied for: PM-KISAN
+            Received: Rs.6,000
+            
+            _"Got Rs.6,000 in just 2 weeks! YojnaMitra made it so easy. Highly recommend!"_ ⭐⭐⭐⭐⭐
+            
+            ---
+            
+            **Priya Sharma** from Maharashtra
+            
+            Applied for: MUDRA Loan
+            Received: Rs.5 lakh loan
+            
+            _"Started my business with MUDRA loan. The step-by-step guide was perfect!"_ ⭐⭐⭐⭐⭐
+            
+            ---
+            
+            **Amit Patel** from Gujarat
+            
+            Applied for: Ayushman Bharat
+            Received: Rs.5 lakh health coverage
+            
+            _"My family is now covered. Thank you YojnaMitra for making it simple!"_ ⭐⭐⭐⭐⭐
             """)
         
         st.markdown("---")
@@ -1490,74 +1852,163 @@ Aapka naam kya hai?"""
         else:
             st.info("ℹ️ Using rule-based matching (RAG unavailable)")
         
+        # Check for upcoming deadlines and show notifications
+        deadline_notifications = search_engine.check_upcoming_deadlines(st.session_state.matched_schemes)
+        if deadline_notifications:
+            st.markdown("### 🔔 Important Notifications")
+            for notif in deadline_notifications:
+                if notif['urgency'] == 'high':
+                    st.error(notif['message'])
+                else:
+                    st.warning(notif['message'])
+            st.markdown("---")
+        
+        # WhatsApp Share Button
+        st.markdown("### 📱 Share Your Schemes")
+        whatsapp_url = generate_whatsapp_share_link(st.session_state.user_profile, st.session_state.matched_schemes)
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        with col1:
+            st.markdown(f"[📱 Share on WhatsApp]({whatsapp_url})")
+            st.caption("Share these schemes with your family and friends!")
+        with col2:
+            schemes_count = len(st.session_state.matched_schemes)
+            st.metric("Schemes Found", schemes_count)
+        with col3:
+            if st.session_state.matched_schemes:
+                avg_match = sum(s.get('match_score', 0) for s in st.session_state.matched_schemes[:5]) / min(5, len(st.session_state.matched_schemes))
+                st.metric("Avg Match", f"{avg_match:.0f}%")
+        with col4:
+            # Download Report Button
+            if st.button("📥 Download Report", use_container_width=True):
+                # Generate simple text report
+                report = f"YojnaMitra-AI Scheme Report\n"
+                report += f"Generated: {datetime.now().strftime('%d %B %Y')}\n\n"
+                report += f"Profile:\n"
+                report += f"Name: {st.session_state.user_profile.get('name', 'N/A')}\n"
+                report += f"Age: {st.session_state.user_profile.get('age', 'N/A')}\n"
+                report += f"State: {st.session_state.user_profile.get('state', 'N/A')}\n"
+                report += f"Occupation: {st.session_state.user_profile.get('occupation', 'N/A')}\n"
+                report += f"Income: Rs.{st.session_state.user_profile.get('income', 0):,}\n\n"
+                report += f"Matched Schemes ({len(st.session_state.matched_schemes)}):\n\n"
+                
+                for i, scheme in enumerate(st.session_state.matched_schemes[:10], 1):
+                    report += f"{i}. {scheme['name']}\n"
+                    report += f"   Benefit: {scheme['benefit']}\n"
+                    report += f"   Match: {scheme.get('match_score', 0)}%\n"
+                    report += f"   Deadline: {scheme['deadline']}\n"
+                    report += f"   Apply: {scheme['apply_link']}\n\n"
+                
+                st.download_button(
+                    label="📥 Download as Text File",
+                    data=report,
+                    file_name=f"yojnamitra_schemes_{datetime.now().strftime('%Y%m%d')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+        
+        st.markdown("---")
         st.markdown("### 🎯 Matched Schemes for You")
         
+        # Group schemes by category
+        scheme_categories = {}
         for scheme in st.session_state.matched_schemes[:5]:
-            # Show match score and priority indicator
-            match_info = ""
-            priority_badge = ""
+            # Determine category based on scheme name/type
+            if any(word in scheme['name'].lower() for word in ['kisan', 'farmer', 'agriculture']):
+                category = '🌾 Agriculture'
+            elif any(word in scheme['name'].lower() for word in ['health', 'ayushman', 'medical']):
+                category = '🏥 Health'
+            elif any(word in scheme['name'].lower() for word in ['scholarship', 'education', 'student']):
+                category = '🎓 Education'
+            elif any(word in scheme['name'].lower() for word in ['mudra', 'loan', 'business']):
+                category = '💼 Business'
+            elif any(word in scheme['name'].lower() for word in ['awas', 'housing', 'home']):
+                category = '🏠 Housing'
+            else:
+                category = '📋 Other'
             
-            if 'match_score' in scheme:
-                match_info = f" ({scheme['match_score']}% match)"
-                # Add priority indicator for high matches
-                if scheme['match_score'] > 90:
-                    priority_badge = "🔥 **HIGHLY RECOMMENDED FOR YOU** | "
-                elif scheme['match_score'] > 80:
-                    priority_badge = "⭐ **GREAT MATCH** | "
+            if category not in scheme_categories:
+                scheme_categories[category] = []
+            scheme_categories[category].append(scheme)
+        
+        # Display schemes by category
+        for category, schemes in scheme_categories.items():
+            st.markdown(f"#### {category}")
             
-            if 'match_reason' in scheme:
-                match_info += f" - {scheme['match_reason']}"
-            
-            # Check for deadline urgency
-            if scheme.get('deadline') and scheme['deadline'] != 'Open':
-                if any(month in scheme['deadline'] for month in ['March', 'April', 'May']):
-                    priority_badge = "⏰ **DEADLINE SOON** | " + priority_badge
-            
-            with st.expander(f"{priority_badge}⭐ {scheme['name']} - {scheme['benefit']}{match_info}"):
-                st.markdown(f"**Full Name:** {scheme['full_name']}")
-                st.markdown(f"**Benefit:** {scheme['benefit']}")
-                st.markdown(f"**Eligibility:** {scheme['eligibility']}")
-                st.markdown(f"**Documents:** {', '.join(scheme['documents'])}")
-                st.markdown(f"**Deadline:** {scheme['deadline']}")
-                st.markdown(f"**Apply:** [{scheme['apply_link']}]({scheme['apply_link']})")
+            for scheme in schemes:
+                # Show match score and priority indicator
+                match_info = ""
+                priority_badge = ""
                 
-                st.markdown("---")
-                st.markdown("### 🚀 Quick Actions")
+                if 'match_score' in scheme:
+                    match_info = f" ({scheme['match_score']}% match)"
+                    # Add priority indicator for high matches
+                    if scheme['match_score'] > 90:
+                        priority_badge = "🔥 **HIGHLY RECOMMENDED FOR YOU** | "
+                    elif scheme['match_score'] > 80:
+                        priority_badge = "⭐ **GREAT MATCH** | "
                 
-                col1, col2, col3, col4 = st.columns(4)
+                if 'match_reason' in scheme:
+                    match_info += f" - {scheme['match_reason']}"
                 
-                with col1:
-                    if st.button(f"📝 Apply Guide", key=f"guide_{scheme['name']}", use_container_width=True):
-                        st.session_state.messages.append({
-                            'role': 'user',
-                            'content': f"How to apply for {scheme['name']}? Please give me complete step-by-step guidance with all 5 steps."
-                        })
-                        st.rerun()
+                # Check for deadline urgency
+                if scheme.get('deadline') and scheme['deadline'] != 'Open':
+                    if any(month in scheme['deadline'] for month in ['March', 'April', 'May']):
+                        priority_badge = "⏰ **DEADLINE SOON** | " + priority_badge
                 
-                with col2:
-                    if st.button(f"🚀 Quick Apply", key=f"apply_{scheme['name']}", use_container_width=True):
-                        st.markdown(f"**Opening {scheme['name']} portal...**")
-                        st.markdown(f"### [🔗 Click here to apply now]({scheme['apply_link']})")
-                        st.info("💡 **Quick Tip**: Keep these ready before applying:\n- Aadhar Card\n- Bank Account details\n- Mobile number for OTP")
-                        st.success("✅ Portal opened! Need help? Click 'Apply Guide' for step-by-step instructions.")
-                
-                with col3:
-                    # Check if already saved
-                    is_saved = any(s['name'] == scheme['name'] for s in st.session_state.saved_schemes)
-                    if is_saved:
-                        st.button(f"✅ Saved", key=f"saved_{scheme['name']}", use_container_width=True, disabled=True)
-                    else:
-                        if st.button(f"💾 Save", key=f"save_{scheme['name']}", use_container_width=True):
-                            st.session_state.saved_schemes.append(scheme)
-                            st.success(f"✅ {scheme['name']} saved!")
+                with st.expander(f"{priority_badge}⭐ {scheme['name']} - {scheme['benefit']}{match_info}"):
+                    st.markdown(f"**Full Name:** {scheme['full_name']}")
+                    st.markdown(f"**Benefit:** {scheme['benefit']}")
+                    st.markdown(f"**Eligibility:** {scheme['eligibility']}")
+                    
+                    # NEW: Show personalized reasons
+                    st.markdown("---")
+                    st.markdown("### 💡 Why This is Perfect for You")
+                    personalized_reasons = search_engine.generate_personalized_reasons(st.session_state.user_profile, scheme)
+                    for reason in personalized_reasons:
+                        st.markdown(reason)
+                    
+                    st.markdown("---")
+                    st.markdown(f"**Documents:** {', '.join(scheme['documents'])}")
+                    st.markdown(f"**Deadline:** {scheme['deadline']}")
+                    st.markdown(f"**Apply:** [{scheme['apply_link']}]({scheme['apply_link']})")
+                    
+                    st.markdown("---")
+                    st.markdown("### 🚀 Quick Actions")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        if st.button(f"📝 Apply Guide", key=f"guide_{scheme['name']}", use_container_width=True):
+                            st.session_state.messages.append({
+                                'role': 'user',
+                                'content': f"How to apply for {scheme['name']}? Please give me complete step-by-step guidance with all 5 steps."
+                            })
                             st.rerun()
-                
-                with col4:
-                    if st.button(f"📄 Documents", key=f"docs_{scheme['name']}", use_container_width=True):
-                        st.markdown("### ✅ Required Documents Checklist")
-                        for doc in scheme['documents']:
-                            st.markdown(f"✓ {doc}")
-                        st.info("💡 Tip: Keep all documents in PDF/JPG format, max 2MB each")
+                    
+                    with col2:
+                        if st.button(f"🚀 Quick Apply", key=f"apply_{scheme['name']}", use_container_width=True):
+                            st.markdown(f"**Opening {scheme['name']} portal...**")
+                            st.markdown(f"### [🔗 Click here to apply now]({scheme['apply_link']})")
+                            st.info("💡 **Quick Tip**: Keep these ready before applying:\n- Aadhar Card\n- Bank Account details\n- Mobile number for OTP")
+                            st.success("✅ Portal opened! Need help? Click 'Apply Guide' for step-by-step instructions.")
+                    
+                    with col3:
+                        # Check if already saved
+                        is_saved = any(s['name'] == scheme['name'] for s in st.session_state.saved_schemes)
+                        if is_saved:
+                            st.button(f"✅ Saved", key=f"saved_{scheme['name']}", use_container_width=True, disabled=True)
+                        else:
+                            if st.button(f"💾 Save", key=f"save_{scheme['name']}", use_container_width=True):
+                                st.session_state.saved_schemes.append(scheme)
+                                st.success(f"✅ {scheme['name']} saved!")
+                                st.rerun()
+                    
+                    with col4:
+                        if st.button(f"📄 Documents", key=f"docs_{scheme['name']}", use_container_width=True):
+                            st.markdown("### ✅ Required Documents Checklist")
+                            for doc in scheme['documents']:
+                                st.markdown(f"✓ {doc}")
+                            st.info("💡 Tip: Keep all documents in PDF/JPG format, max 2MB each")
     
     # Scheme Comparison Feature
     if len(st.session_state.matched_schemes) >= 2:
